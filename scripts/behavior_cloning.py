@@ -77,18 +77,23 @@ def index_observation(obs_d,index):
             new_dict[modality][orientation] = obs_d[modality][orientation][index] 
     new_dict['ee'] = np.asarray(obs_d['ee'][index])
     return new_dict 
-def index_action(action_d,index): 
+def index_action(action_d,index,device=None): 
     """ Same as obvervations but acting overt the actions dictionary 
 
     """
     new_dict = dict()
     ##TODO:#Do a similar approach of indixing above where instead of having (num_steps,x,y) we have (x,y) 
     for e in action_d.keys(): 
-        new_dict[e] = action_d[e][index]
+        if  'position' in e: 
+            new_dict[e] = torch.tensor(action_d[e][index,0:2],device=device)
+        else: 
+            new_dict[e] = torch.tensor(action_d[e][index],device=device)
     return new_dict
 
 
 def model_train(policy,traj_info,device='cuda:0',opti=None): 
+    torch.autograd.set_detect_anomaly(True)
+    my_loss =torch.nn.NLLLoss()
     #step our model over a single trajectory
     traj_steps= traj_info['traj_meta']['steps']
     #i make a dummy enviroment just to pull some extra metadata information.  not used elsewhere
@@ -120,7 +125,7 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
         obs = prepare_obs(obs=obs, rgb_dict=None, meta=meta_info).to_torch_tensor(
             device=device
             )
-        ################# BEGIN COMPLICATED FORWARD STEP DO NOT TOUCH ###########
+        ################# BEGIN COMPLICATED FORWARD STOP ###########
         obs_token_this_step, obs_mask_this_step = policy.forward_obs_token(obs)
         obs_token_this_step = obs_token_this_step.squeeze(0)
         obs_mask_this_step = obs_mask_this_step.squeeze(0)
@@ -186,60 +191,34 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             0
         )  # (1, B, E)
         dist_dict = policy.forward_action_decoder(predicted_action_tokens)
-        actions = {k: v.mode() for k, v in dist_dict.items()}
-        action_tokens = policy.forward_action_token(actions)  # (1, B, E)
+        oracle_action = index_action(action_d=oracle_action_d,index=c_step,device=device)  
+        dec = policy.discretize_action(oracle_action)
+        actions = {k: v.mode() for k, v in dist_dict.items()}  
+        action_probs = dict() 
+        for k,v in dist_dict.items(): 
+            action_probs[k] = list() 
+            for  dist in v._dists:
+                action_probs[k].append(dist.probs)
+
+
+        ## this al for determing the next action 
+      
+        action_tokens = policy.forward_action_token(oracle_action)  # (1, B, E)
         action_tokens = action_tokens.squeeze(0)  # (B, E)
         inference_cache["action_tokens"].append(action_tokens[0])
-        actions = policy._de_discretize_actions(actions)
-        action_bounds = [meta_info["action_bounds"]]
-        action_bounds_low = [action_bound["low"] for action_bound in action_bounds]
-        action_bounds_high = [
-            action_bound["high"] for action_bound in action_bounds
-        ]
-        action_bounds_low = np.asarray(action_bounds_low)
-        action_bounds_high = np.asarray(action_bounds_high)
-        action_bounds_low = torch.tensor(
-            action_bounds_low, dtype=torch.float32, device=device
-        )
-        action_bounds_high = torch.tensor(
-            action_bounds_high, dtype=torch.float32, device=device
-        )
-        actions["pose0_position"] = (
-            actions["pose0_position"] * (action_bounds_high - action_bounds_low)
-            + action_bounds_low
-        )
-        actions["pose1_position"] = (
-            actions["pose1_position"] * (action_bounds_high - action_bounds_low)
-            + action_bounds_low
-        )
-        actions["pose0_position"] = torch.clamp(
-            actions["pose0_position"], min=action_bounds_low, max=action_bounds_high
-        )
-        actions["pose1_position"] = torch.clamp(
-            actions["pose1_position"], min=action_bounds_low, max=action_bounds_high
-        )
-        actions["pose0_rotation"] = actions["pose0_rotation"] * 2 - 1
-        actions["pose1_rotation"] = actions["pose1_rotation"] * 2 - 1
-        actions["pose0_rotation"] = torch.clamp(
-            actions["pose0_rotation"], min=-1, max=1
-        )
-        actions["pose1_rotation"] = torch.clamp(
-            actions["pose1_rotation"], min=-1, max=1
-        )
-        ################# END COMPLICATED FORWARD STEP DO NOT TOUCH ###########
-        actions = {k: v.cpu() for k, v in actions.items()} #REMove the call to numpy 
-        oracle_action = index_action(action_d=oracle_action_d,index=c_step)  
-        ##TODO for the position  the oracle provides xyz positions so we need to shorten  those vectors to only use the first 2 columns 
-        
-        for k in actions.keys(): 
-            act = actions[k] 
-            oc_act = oracle_action[k] 
-            pdb.set_trace()
-            diff = torch.sum((act-oc_act)**2)
-        differences = torch.tensor([ ( actions[k]-oracle_action[k] )**2 for k in actions.keys()])
-        avv_diff = torch.mean(differences)
-        c_step = c_step+1 
         pdb.set_trace()
+        ##TODO for the position  the oracle provides xyz positions so we need to shorten  those vectors to only use the first 2 columns 
+        l = 0 
+        for k in actions.keys(): 
+            if 'position' in k:  
+                action_vec = dec[k]
+                for d in range(2):
+                    l+= my_loss(action_probs[k][d][0][0],action_vec[d]) 
+
+        l.backward(retain_graph=True) 
+        print(l)
+        c_step = c_step+1 
+        opti.step()
         #TODO use get action function to get the expected function from the oracles action 
         #TODO copy the training loop of the people in stable_baselines 
         #TODO #https://github.com/hill-a/stable-baselines/blob/master/stable_baselines/common/base_class.py#L753
@@ -263,7 +242,7 @@ def main():
     device = 'cuda:0'
     weight_path ="/home/rlcorrea/CSE574_project_vima/model_weights/2M.ckpt"
     policy = create_policy_from_ckpt(weight_path,device,ignore_statedict=None)
-    policy.train()
+    policy = policy.train()
     policy = policy.to(device)
     opti = Adam(policy.parameters(),lr=0.001)
     for traj in trajectories:
