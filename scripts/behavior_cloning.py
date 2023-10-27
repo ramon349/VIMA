@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import pdb 
 import numpy as np
@@ -13,13 +12,6 @@ import pickle as pkl
 from PIL import Image 
 from example import prepare_prompt,prepare_obs
 import torch 
-
-_kwargs = {
-    "single_word": True,
-    "lstrip": False,
-    "rstrip": False,
-    "normalized": True,
-}
 
 
 
@@ -118,19 +110,21 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
         )
     obs_d = traj_info['obs']
     oracle_action_d = traj_info['action']
-    for i in range(traj_steps): 
-        #get the current observation   
+    l = torch.tensor([0],device=device)
+    for i in range(traj_steps):
+        opti.zero_grad() 
+        #get the current observation  and preprocess it 
         obs = index_observation(obs_d,c_step)
         obs = add_batch_dim(obs)
         obs = prepare_obs(obs=obs, rgb_dict=None, meta=meta_info).to_torch_tensor(
             device=device
             )
-        ################# BEGIN COMPLICATED FORWARD STOP ###########
+        ################# BEGIN COMPLICATED FORWARD STEP ###########
         obs_token_this_step, obs_mask_this_step = policy.forward_obs_token(obs)
         obs_token_this_step = obs_token_this_step.squeeze(0)
         obs_mask_this_step = obs_mask_this_step.squeeze(0)
-        inference_cache["obs_tokens"].append(obs_token_this_step[0])
-        inference_cache["obs_masks"].append(obs_mask_this_step[0])
+        inference_cache["obs_tokens"].append(obs_token_this_step[0].detach())
+        inference_cache["obs_masks"].append(obs_mask_this_step[0].detach())
         max_objs = max(x.shape[0] for x in inference_cache["obs_tokens"])
         obs_tokens_to_forward, obs_masks_to_forward = [], []
         obs_tokens_this_env, obs_masks_this_env = [], []
@@ -167,18 +161,19 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             )
         obs_tokens_to_forward.append(any_stack(obs_tokens_this_env, dim=0))
         obs_masks_to_forward.append(any_stack(obs_masks_this_env, dim=0))
+        if len(obs_tokens_to_forward)>1: 
+            obs_tokens_to_forward = [e.detach() for e in obs_tokens_to_forward]
         obs_tokens_to_forward = any_stack(obs_tokens_to_forward, dim=0)
         obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
         obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1)
         obs_masks_to_forward = obs_masks_to_forward.transpose(0, 1)
-
-        if c_step == 0:
+        if c_step ==0: 
             action_tokens_to_forward = None
         else:
             action_tokens_to_forward = any_stack(
-                [any_stack(inference_cache["action_tokens"], dim=0)],
-                dim=0,
-            )
+                    [any_stack(inference_cache["action_tokens"], dim=0)],
+                    dim=0,
+                )
             action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
         predicted_action_tokens = policy.forward(
             obs_token=obs_tokens_to_forward,
@@ -187,38 +182,41 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             prompt_token_mask=prompt_masks,
             obs_mask=obs_masks_to_forward,
         )  # (L, B, E)
+        #
         predicted_action_tokens = predicted_action_tokens[-1].unsqueeze(
             0
         )  # (1, B, E)
         dist_dict = policy.forward_action_decoder(predicted_action_tokens)
         oracle_action = index_action(action_d=oracle_action_d,index=c_step,device=device)  
-        dec = policy.discretize_action(oracle_action)
+        with torch.no_grad():
+            dec = policy.discretize_action(oracle_action)
         actions = {k: v.mode() for k, v in dist_dict.items()}  
         action_probs = dict() 
         for k,v in dist_dict.items(): 
             action_probs[k] = list() 
             for  dist in v._dists:
-                action_probs[k].append(dist.probs)
+                action_probs[k].append(torch.log(dist.probs))
 
 
         ## this al for determing the next action 
-      
-        action_tokens = policy.forward_action_token(oracle_action)  # (1, B, E)
-        action_tokens = action_tokens.squeeze(0)  # (B, E)
-        inference_cache["action_tokens"].append(action_tokens[0])
-        pdb.set_trace()
-        ##TODO for the position  the oracle provides xyz positions so we need to shorten  those vectors to only use the first 2 columns 
-        l = 0 
+        with torch.no_grad(): 
+            action_tokens = policy.forward_action_token(oracle_action)  # (1, B, E)
+            action_tokens = action_tokens.squeeze(0)  # (B, E)
+            inference_cache["action_tokens"].append(action_tokens[0].detach())
+
         for k in actions.keys(): 
             if 'position' in k:  
-                action_vec = dec[k]
+                action_vec = dec[k].unsqueeze(0)
                 for d in range(2):
-                    l+= my_loss(action_probs[k][d][0][0],action_vec[d]) 
-
-        l.backward(retain_graph=True) 
-        print(l)
+                    probs= action_probs[k][d].squeeze(0)
+                    if probs.shape[0]>1: 
+                        l = l+  my_loss(probs[-1],action_vec[:,d]) 
+                    else: 
+                        l = l+  my_loss(probs,action_vec[:,d]) 
         c_step = c_step+1 
+        l.backward(retain_graph=True) 
         opti.step()
+        print(l)
         #TODO use get action function to get the expected function from the oracles action 
         #TODO copy the training loop of the people in stable_baselines 
         #TODO #https://github.com/hill-a/stable-baselines/blob/master/stable_baselines/common/base_class.py#L753
@@ -242,9 +240,14 @@ def main():
     device = 'cuda:0'
     weight_path ="/home/rlcorrea/CSE574_project_vima/model_weights/2M.ckpt"
     policy = create_policy_from_ckpt(weight_path,device,ignore_statedict=None)
+    policy.train() 
+    for e in policy.parameters(): 
+        e.requries_grad = False
+    for e in policy.xattn_gpt.parameters(): 
+        e.requires_grad = True 
     policy = policy.train()
     policy = policy.to(device)
-    opti = Adam(policy.parameters(),lr=0.001)
+    opti = Adam(policy.parameters(),lr=0.005)
     for traj in trajectories:
         elapsed_steps =0  
         traj_info =  load_trajectory_info(traj)

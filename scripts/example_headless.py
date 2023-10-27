@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import sys
 import os
 import pdb 
 import numpy as np
@@ -136,9 +136,8 @@ def main(cfg):
         env.global_seed = seed
 
         obs = env.reset()
-        pdb.set_trace()
         meta_info = env.meta_info  
-        prompt = ee.prompt
+        prompt = env.prompt
         prompt_assets = env.prompt_assets
         elapsed_steps = 0
         inference_cache = {}
@@ -222,6 +221,7 @@ def main(cfg):
                 prompt_token_mask=prompt_masks,
                 obs_mask=obs_masks_to_forward,
             )  # (L, B, E)
+            pdb.set_trace()
             predicted_action_tokens = predicted_action_tokens[-1].unsqueeze(
                 0
             )  # (1, B, E)
@@ -229,6 +229,7 @@ def main(cfg):
             actions = {k: v.mode() for k, v in dist_dict.items()}
             action_tokens = policy.forward_action_token(actions)  # (1, B, E)
             action_tokens = action_tokens.squeeze(0)  # (B, E)
+            pdb.set_trace()
             inference_cache["action_tokens"].append(action_tokens[0])
             actions = policy._de_discretize_actions(actions)
             action_bounds = [meta_info["action_bounds"]]
@@ -273,6 +274,7 @@ def main(cfg):
             print(f'got reward: {reward}')
             elapsed_steps += 1
             if done:
+                sys.exit()
                 break
 
 
