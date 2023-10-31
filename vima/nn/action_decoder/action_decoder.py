@@ -49,7 +49,11 @@ class ActionDecoder(nn.Module):
                 raise ValueError(f"Invalid action_dims value: {v}")
 
     def forward(self, x: torch.Tensor):
-        return {k: v(x) for k, v in self._decoders.items()}
+        output_dict=  dict() 
+        for e in self._decoders.keys(): 
+            my_dec = self._decoders[e]
+            output_dict[e] = my_dec(x)
+        return output_dict
 
 
 def _build_mlp_distribution_net(
@@ -163,7 +167,13 @@ class MultiCategoricalNet(nn.Module):
         self.head = MultiCategoricalHead(action_dims)
 
     def forward(self, x):
-        return self.head(torch.cat([mlp(x) for mlp in self.mlps], dim=-1))
+        mlp_actis = [] 
+        print(len(self.mlps))
+        for mlp in self.mlps: 
+            output = mlp(x)
+            mlp_actis.append(output)
+        all_actis = torch.concat(mlp_actis,dim=-1)
+        return self.head(all_actis)
 
 
 class CategoricalHead(nn.Module):

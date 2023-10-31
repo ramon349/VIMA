@@ -190,7 +190,7 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
         oracle_action = index_action(action_d=oracle_action_d,index=c_step,device=device)  
         with torch.no_grad():
             dec = policy.discretize_action(oracle_action)
-        actions = {k: v.mode() for k, v in dist_dict.items()}  
+        #actions = {k: v.detach().mode() for k, v in dist_dict.items()}  
         action_probs = dict() 
         for k,v in dist_dict.items(): 
             action_probs[k] = list() 
@@ -204,7 +204,7 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             action_tokens = action_tokens.squeeze(0)  # (B, E)
             inference_cache["action_tokens"].append(action_tokens[0].detach())
 
-        for k in actions.keys(): 
+        for k in dist_dict.keys(): 
             if 'position' in k:  
                 action_vec = dec[k].unsqueeze(0)
                 for d in range(2):
@@ -242,7 +242,7 @@ def main():
     policy = create_policy_from_ckpt(weight_path,device,ignore_statedict=None)
     policy.train() 
     for e in policy.parameters(): 
-        e.requries_grad = False
+        e.requries_grad = True 
     for e in policy.xattn_gpt.parameters(): 
         e.requires_grad = True 
     policy = policy.train()
