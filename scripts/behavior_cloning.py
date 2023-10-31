@@ -183,9 +183,9 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             obs_mask=obs_masks_to_forward,
         )  # (L, B, E)
         #
-        predicted_action_tokens = predicted_action_tokens[-1].unsqueeze(
+        predicted_action_tokens = predicted_action_tokens[-1].unsqueeze( 
             0
-        )  # (1, B, E)
+        )  # (1, B, E) # reading pytorch docs suggest that squeeze operations may be problematic 
         dist_dict = policy.forward_action_decoder(predicted_action_tokens)
         oracle_action = index_action(action_d=oracle_action_d,index=c_step,device=device)  
         with torch.no_grad():
