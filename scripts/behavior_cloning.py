@@ -15,6 +15,8 @@ import torch
 from vima.trajectory.trajectory_util import load_trajectory_info
 from torch.optim import Adam 
 from vima.policy.vima_policy  import VIMAPolicy 
+from pathlib import Path 
+from torch.utils.tensorboard import SummaryWriter 
 def index_observation(obs_d,index): 
     """ observations have the structure (number_of_steps,h,w,c) 
         we need to return new observations dictionary that is just  (1,h,w,c) 
@@ -41,19 +43,24 @@ def index_action(action_d,index,device=None):
     return new_dict
 
 
-def model_train(policy,traj_info,device='cuda:0',opti=None): 
-    torch.autograd.set_detect_anomaly(True)
-    #step our model over a single trajectory
+def model_train(policy,traj_info,device='cuda:0',opti=None,writer=None,total_counter=0): 
+    """ We train a model over the course of a single trajectory  
+    policy  : Our Vima Policy model 
+    traj_info:  Dictionary containing RGB Images, Trjaectory information etc 
+    device:  GPU/CPU device used for training 
+    opti: Optimizer used during training 
+    writer: SummaryWriter Instane used for logging rewards and other metrics 
+    total_counter:  this just counts which trajectory we are on. Used to  log entries in tensorboard
+    """ 
     #how many steps to take in our trajectory 
     traj_steps= traj_info['traj_meta']['steps']
-    #i make a dummy enviroment just to pull some extra metadata information. 
+    #i make a dummy enviroment just to pull some extra metadata information. #TODO change hardcoded values  
     env = make('rearrange',modalities=['segm','rgb'],task_kwargs=PARTITION_TO_SPECS["test"]['placement_generalization']['rearrange'],seed=42,render_prompt=False,display_debug_window=False,hide_arm_rgb=False,record_gui=False)
     env.reset() 
     meta_info = env.meta_info 
     c_step = 0
-    inference_cache = dict()  
-    # is used to maintained a list of  observations and actions 
-    #TODO: i do not understand what the  purpose of the mask is 
+    inference_cache = dict() # is used to maintained a list of  observations and actions 
+    #TODO: i do not understand just yet what this does 
     inference_cache["obs_tokens"] = []
     inference_cache["obs_masks"] = []
     inference_cache["action_tokens"] = []
@@ -61,7 +68,7 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
     prompt,prompt_assets = traj_info['prompt'],traj_info['prompt_assets']
     #START THE FORWARD LOOP HERE  
 
-    #pre process prompt
+    #pre-process the general prompt 
     prompt_token_type, word_batch, image_batch = prepare_prompt(
         prompt=prompt, prompt_assets=prompt_assets, views=["front", "top"]
     ) 
@@ -73,7 +80,7 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
         )
     obs_d = traj_info['obs']
     oracle_action_d = traj_info['action']
-    l = torch.tensor([0],device=device)
+    total_l = 0 
     for i in range(traj_steps):
         opti.zero_grad() 
         inference_cache = dict()  
@@ -99,7 +106,6 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             obs_this_env_this_step = inference_cache["obs_tokens"][idx]
             obs_mask_this_env_this_step = inference_cache["obs_masks"][idx]
             required_pad = max_objs - obs_this_env_this_step.shape[0]
-            #could this be to stack the models?  with different trajectories at once?
             obs_tokens_this_env.append(
                 any_concat(
                     [
@@ -130,7 +136,6 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
         #stack the list 
         obs_tokens_to_forward.append(any_stack(obs_tokens_this_env, dim=0))
         obs_masks_to_forward.append(any_stack(obs_masks_this_env, dim=0))
-
         obs_tokens_to_forward = any_stack(obs_tokens_to_forward, dim=0)
         obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
         obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1)
@@ -143,6 +148,8 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
                     dim=0,
                 )
             action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
+        ### END complicated forward step 
+        #the models actions are provided as a single embedding 
         predicted_action_tokens = policy.forward(
             obs_token=obs_tokens_to_forward,
             action_token=action_tokens_to_forward,
@@ -150,31 +157,31 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
             prompt_token_mask=prompt_masks,
             obs_mask=obs_masks_to_forward,
         )  # (L, B, E)
-        #
         predicted_action_tokens[-1].view((1,1,256)) 
         pred_x,pred_y = predicted_action_tokens[-1].shape 
         predicted_action_tokens = predicted_action_tokens.view(1,pred_x,pred_y)
-        #predicted_action_tokens = predicted_action_tokens[-1].unsqueeze( 
-        #    0
-        #)  # (1, B, E) # reading pytorch docs suggest that squeeze operations may be problematic 
+        # We discretize them into actual probabilities  of x,y,z placements 
         dist_dict = policy.forward_action_decoder(predicted_action_tokens)
         oracle_action = index_action(action_d=oracle_action_d,index=c_step,device=device)  
         dec = policy.discretize_action(oracle_action)
-
         action_probs = dict() 
         for k,v in dist_dict.items(): 
             action_probs[k] = list() 
             for  dist in v._dists:
                 acti_prob = torch.log(dist.probs)
                 action_probs[k].append(acti_prob)
-
-
         ## this al for determing the next action 
         action_tokens = policy.forward_action_token(oracle_action)  # (1, B, E)
         action_tokens = action_tokens.squeeze(0)  # (B, E)
-        inference_cache["action_tokens"].append(oracle_action)
-        #action probs will contain the log probabilities of the actions taken by my model  
-        #  
+        inference_cache["action_tokens"].append(oracle_action) # we append the oracles action not the models action to history 
+        #why do we do this? because you want to condition on correct actions not incorrect ones 
+        # Loss calculation TODO: Make this into a function that returns a singular value. Also make it use negative log likelihood
+        # the ground truth is 
+        #  arm0-position: [pos0,pos1]  <-- this is the  ideal ground truth positions  the values each range from 0-50
+        #the model outputs probabilities such tht 
+        #  action_probs[arm0-position_pred] : [pos0:(1x50),pos1:(1x50)] et 
+        #our task is almost treated as predict the  next position given what the model has seen 
+        #so we have posiiton labels and position probabilities you can apply the negative log likelihood to that. 
         l = 0
         for k in dist_dict.keys(): 
             for d in range(len(action_probs[k])):
@@ -182,12 +189,37 @@ def model_train(policy,traj_info,device='cuda:0',opti=None):
                 discrete_index = dec[k][d]
                 l = l+  -1*indiv_prob[discrete_index]
         c_step =0 
-        l.backward(retain_graph=False) 
+        l.backward(retain_graph=False)
+        total_l += l.detach()   
         opti.step()
         opti.zero_grad()
+    writer.add_scalar("train_step",total_l/traj_steps,global_step=total_counter)
+
+def init_summary_writter(summary_dir): 
+    """ initialized the tensorboard logger
+        - summary_dir is where the tensorboard logs should be store. will have format dir/version_{d} . only specify the dir part
+        - will make a weights directory by swapping the word logs with weights. This is suboptimal but ok 
+
+    """
+    
+    paths = [e for e in Path(summary_dir).rglob("version_*")] 
+    if len(paths)>0: 
+        max_version = max([ int(str(e).split("_")[-1]) for e in Path(summary_dir).rglob("version_*")])
+    else: 
+        max_version = -1
+    new_version = max_version +1
+    log_path = os.path.join(summary_dir,f"version_{new_version}")
+    weight_path  =  log_path.replace("logs","weihgts") 
+    os.makedirs(weight_path,exist_ok=True)
+    weight_path= os.path.join(weight_path,'w.ckpt')
+    writer = SummaryWriter(os.path.join(summary_dir,f"version_{new_version}"))
+    return writer,weight_path
+
+
 
 def main(): 
     seed = 42
+    summary_dir ="/home/rlcorrea/CSE574_project_vima/model_logs"
     #Path to the trajectories 
     trajectories = glob("/scratch/rlcorrea/vima_v6/rearrange_then_restore/*") 
     #filter out the metadata.pkl from our list of trajectory folders 
@@ -197,22 +229,27 @@ def main():
     #This are the  parameters for the  model used in the 2M configuration 
     vima_config = {'embed_dim': 256, 'xf_n_layers': 1, 'sattn_n_heads': 8, 'xattn_n_heads': 8}
     policy =  VIMAPolicy(**vima_config) 
+    weight_path = "/home/rlcorrea/CSE574_project_vima/model_weights/2M.ckpt"
+    ckpt = torch.load(weight_path,map_location=device) 
+    #load the pretrained model except for the policy agents weight. The action prediction is handeled by the cross attention_gpt 
+    policy.load_state_dict({k.replace('policy.',""):v for k,v in ckpt['state_dict'].items() if 'xattn_gpt' not in k},strict=False)
     policy = policy.train()
+    writer,weight_path = init_summary_writter(summary_dir)
+    #make it so only the cross attention component is trainable 
     for n,e in policy.named_parameters(): 
         e.requires_grad = False 
     for n,e in policy.xattn_gpt.named_parameters(): 
         e.requires_grad = True 
     policy = policy.to(device)
-    opti = Adam(policy.parameters(),lr=0.005)
-    for n,e in  policy.named_parameters(): 
-        if  e.requires_grad: 
-            print(n)
-    for traj in trajectories:
+    opti = Adam(policy.parameters(),lr=0.1)
+    total_counter= 0 
+    for i,traj in enumerate(trajectories):
         elapsed_steps =0  
         traj_info =  load_trajectory_info(traj)
-        model_train(policy=policy,traj_info=traj_info,device='cuda:0',opti=opti)
-        
-
+        model_train(policy=policy,traj_info=traj_info,device='cuda:0',opti=opti,writer=writer,total_counter=total_counter)
+        total_counter +=1 
+        if (i%100) ==0:
+            torch.save(policy.state_dict(),weight_path)
 
 if __name__ == "__main__":
     main()
