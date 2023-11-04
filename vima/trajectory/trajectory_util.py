@@ -11,6 +11,15 @@ from einops import rearrange
 import cv2
 from vima.utils import *
 from vima_bench import *
+from tokenizers import Tokenizer,AddedToken
+import os
+import numpy as np
+from tokenizers import Tokenizer
+from tokenizers import AddedToken
+from einops import rearrange
+import cv2
+from vima.utils import *
+from vima_bench import *
 
 def action_load(traj_path): 
     with open(os.path.join(traj_path, "action.pkl"), "rb") as f:
@@ -194,3 +203,61 @@ def prepare_prompt(*, prompt: str, prompt_assets: dict, views: list[str]):
     word_batch = any_to_torch_tensor(word_batch)
     image_batch = image_batch.to_torch_tensor()
     return raw_prompt_token_type, word_batch, image_batch
+
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+
+_kwargs = {
+    "single_word": True,
+    "lstrip": False,
+    "rstrip": False,
+    "normalized": True,
+}
+
+PLACEHOLDER_TOKENS = [
+    AddedToken("{base_obj}", **_kwargs),
+    AddedToken("{base_obj_1}", **_kwargs),
+    AddedToken("{base_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj}", **_kwargs),
+    AddedToken("{dragged_obj_1}", **_kwargs),
+    AddedToken("{dragged_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj_3}", **_kwargs),
+    AddedToken("{dragged_obj_4}", **_kwargs),
+    AddedToken("{dragged_obj_5}", **_kwargs),
+    AddedToken("{swept_obj}", **_kwargs),
+    AddedToken("{bounds}", **_kwargs),
+    AddedToken("{constraint}", **_kwargs),
+    AddedToken("{scene}", **_kwargs),
+    AddedToken("{demo_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_blicker_obj_3}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_3}", **_kwargs),
+    AddedToken("{start_scene}", **_kwargs),
+    AddedToken("{end_scene}", **_kwargs),
+    AddedToken("{before_twist_1}", **_kwargs),
+    AddedToken("{after_twist_1}", **_kwargs),
+    AddedToken("{before_twist_2}", **_kwargs),
+    AddedToken("{after_twist_2}", **_kwargs),
+    AddedToken("{before_twist_3}", **_kwargs),
+    AddedToken("{after_twist_3}", **_kwargs),
+    AddedToken("{frame_0}", **_kwargs),
+    AddedToken("{frame_1}", **_kwargs),
+    AddedToken("{frame_2}", **_kwargs),
+    AddedToken("{frame_3}", **_kwargs),
+    AddedToken("{frame_4}", **_kwargs),
+    AddedToken("{frame_5}", **_kwargs),
+    AddedToken("{frame_6}", **_kwargs),
+    AddedToken("{ring}", **_kwargs),
+    AddedToken("{hanoi_stand}", **_kwargs),
+    AddedToken("{start_scene_1}", **_kwargs),
+    AddedToken("{end_scene_1}", **_kwargs),
+    AddedToken("{start_scene_2}", **_kwargs),
+    AddedToken("{end_scene_2}", **_kwargs),
+    AddedToken("{start_scene_3}", **_kwargs),
+    AddedToken("{end_scene_3}", **_kwargs),
+]
+PLACEHOLDERS = [token.content for token in PLACEHOLDER_TOKENS]
+tokenizer = Tokenizer.from_pretrained("t5-base")
+tokenizer.add_tokens(PLACEHOLDER_TOKENS)

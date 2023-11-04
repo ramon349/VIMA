@@ -103,9 +103,8 @@ class TrajectoryLoader:
         self.set_trajectory_map()
         self.trajectory_ids = list(self.folder_map.keys())
         # we need to make the dataset repeatble so we will actually repeat the trajectoryids so we can sample from them
-        self.trajectories_2_sample = (
-            list()
-        )  # NOTE: this is my equivalent to demonstration tuples
+        self.trajectories_2_sample = list()
+
         for i in range(self.n_epochs):
             c_traj = self.trajectory_ids.copy()
             random.shuffle(c_traj)
@@ -163,7 +162,8 @@ class TrajectoryLoader:
 
     def set_trajectory_map(self):
         folder = self.trajectory_folder
-        traj_folders = glob(folder)
+        from pathlib import Path 
+        traj_folders = [str(e) for e in Path(folder).glob("*")]
         folder_map = dict()
         folder_map = {
             e.split("/")[-1]: e for e in traj_folders if not e.endswith(".pkl")
@@ -183,7 +183,12 @@ def main():
         max_queue_size=20,
     )
     for e in dl:
-        print("hi")
+        #what is the batchsize looking like 
+        # e[0] is the trajectory_id 
+        # e[1] is the observations 
+        # e[2] is the actions 
+        # e[3] should be the prompt info
+        pdb.set_trace() 
 
 
 if __name__ == "__main__":

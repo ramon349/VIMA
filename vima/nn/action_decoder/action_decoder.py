@@ -168,7 +168,6 @@ class MultiCategoricalNet(nn.Module):
 
     def forward(self, x):
         mlp_actis = [] 
-        print(len(self.mlps))
         for mlp in self.mlps: 
             output = mlp(x)
             mlp_actis.append(output)
