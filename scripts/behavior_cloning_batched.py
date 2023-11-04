@@ -16,32 +16,9 @@ from vima.trajectory.trajectory_util import load_trajectory_info
 from torch.optim import Adam 
 from vima.policy.vima_policy  import VIMAPolicy 
 from pathlib import Path 
-from torch.utils.tensorboard import SummaryWriter 
+from torch.utils.tensorboard import SummaryWriter
+from trajectory_dataset import traj_object
 
-def index_observation(obs_d,index): 
-    """ observations have the structure (number_of_steps,h,w,c) 
-        we need to return new observations dictionary that is just  (1,h,w,c) 
-        index: which time step we will pull from 
-    """
-    new_dict = dict() 
-    for modality in ['rgb','segm']: 
-        new_dict[modality]= dict()
-        for orientation in ['top','front']: 
-            new_dict[modality][orientation] = obs_d[modality][orientation][index] 
-    new_dict['ee'] = np.asarray(obs_d['ee'][index])
-    return new_dict 
-def index_action(action_d,index,device=None): 
-    """ Same as obvervations but acting overt the actions dictionary 
-
-    """
-    new_dict = dict()
-    ##TODO:#Do a similar approach of indixing above where instead of having (num_steps,x,y) we have (x,y) 
-    for e in action_d.keys(): 
-        if  'position' in e: 
-            new_dict[e] = torch.tensor(action_d[e][index,0:2],device=device)
-        else: 
-            new_dict[e] = torch.tensor(action_d[e][index],device=device)
-    return new_dict
 
 def model_train(policy,traj_info,device='cuda:0',opti=None,writer=None,total_counter=0): 
     """ We train a model over the course of a single trajectory  
