@@ -19,12 +19,30 @@ from torch.utils.tensorboard import SummaryWriter
 from vima.trajectory.trajectory_dataset import TrajectoryLoader
 from collections import defaultdict
 
+class LruCacheTrajectories(): 
+    def __init__(self,capacity=10): 
+        self.store_dict = defaultdict(init_empty_cache_dict)
+        self.capacity = capacity 
+
+
 def init_empty_cache_dict(): 
     new_d = dict() 
     new_d['obs_tokens']=list() 
     new_d['obs_masks'] = list() 
     new_d['action_tokens'] = list() 
+    new_d['num_steps']= 0 
     return new_d
+
+def clear_cache(inference_cache): 
+    num_to_del = 0 
+    keys_to_check = list(inference_cache.keys() )
+    for k in keys_to_check: 
+        history = inference_cache[k] 
+        if len(history['action_tokens']) >= history['num_steps']: 
+            num_to_del +=1
+            del inference_cache[k]  
+    return num_to_del
+
 def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,total_counter=0): 
     """ We train a model over the course of a single trajectory  
     policy  : Our Vima Policy model 
@@ -40,11 +58,11 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
     meta_info = env.meta_info 
     batched_inference_cahce = defaultdict(init_empty_cache_dict)
     step_counter = 0 
-    for traj_ids,observations,actions ,prompt_infos in data_loader: 
+    for traj_ids,observations,actions ,prompt_infos ,trajectory_steps, in data_loader: 
        num_batches = len(prompt_infos)
        opti.zero_grad()
        total_loss =0 
-       for batch in range(num_batches): 
+       for batch in range(num_batches):
             traj_id = traj_ids[batch]
             prompt_token_type = prompt_infos[batch][0]
             word_batch = prompt_infos[batch][1]
@@ -58,6 +76,7 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
                 (prompt_token_type, word_batch, image_batch)
                 )
             traj_inf_cache = batched_inference_cahce[traj_id]
+            traj_inf_cache['num_steps'] =trajectory_steps[batch] 
             input_d = {
                 'prompt_tokens':prompt_tokens,
                 'prompt_masks':prompt_masks,
@@ -65,14 +84,17 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
                 'oracle_action':oracle_action,
             }
             loss = simple_forward(policy=policy,inputs=input_d,inference_cache=traj_inf_cache,meta_info=meta_info,device=device)
-            total_loss = total_loss + loss 
+            total_loss = total_loss + loss
        writer.add_scalar("batch_loss",total_loss,global_step=step_counter)
        step_counter +=1 
-       print(f" On Step {step_counter} loss: {total_loss:0.4}",end='\r')
+       print(f" On Step {step_counter} loss: {total_loss:0.2} cache has len: {len(batched_inference_cahce)}")
        #TODO add model saving here after some time
        total_loss.backward() 
        opti.step()
-
+       if len(batched_inference_cahce) >= 20:
+           print("Clearing out cache")
+           num_to_del = clear_cache(batched_inference_cahce)
+           print(f"I would delete {num_to_del} entries")
 def action_to_device(action,device= None): 
     for e in action.keys(): 
         action[e] = action[e].to(device)
