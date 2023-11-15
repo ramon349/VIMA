@@ -87,14 +87,13 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
             total_loss = total_loss + loss
        writer.add_scalar("batch_loss",total_loss,global_step=step_counter)
        step_counter +=1 
-       print(f" On Step {step_counter} loss: {total_loss:0.2} cache has len: {len(batched_inference_cahce)}")
+       print(f" On Step {step_counter} loss: {total_loss:0.2} cache has len: {len(batched_inference_cahce)}",end='\r')
        #TODO add model saving here after some time
        total_loss.backward() 
        opti.step()
        if len(batched_inference_cahce) >= 20:
            print("Clearing out cache")
-           num_to_del = clear_cache(batched_inference_cahce)
-           print(f"I would delete {num_to_del} entries")
+           clear_cache(batched_inference_cahce)
 def action_to_device(action,device= None): 
     for e in action.keys(): 
         action[e] = action[e].to(device)
