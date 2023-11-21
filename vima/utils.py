@@ -1,3 +1,4 @@
+from __future__ import annotations
 import collections
 import numpy as np
 import copy
@@ -914,3 +915,6 @@ def add_batch_dim(x):
         return x.unsqueeze(0)
     else:
         raise NotImplementedError(f"Unsupported data structure: {type(x)}")
+
+
+

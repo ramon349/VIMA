@@ -2,7 +2,6 @@ from __future__ import annotations
 import os
 import pdb 
 import numpy as np
-from einops import rearrange
 from vima.utils import *
 from vima_bench import make,PARTITION_TO_SPECS
 from vima import create_policy_from_ckpt
@@ -43,6 +42,40 @@ def clear_cache(inference_cache):
             del inference_cache[k]  
     return num_to_del
 
+
+import torch.nn.functional as F
+def pad_tensors(tensors, padding_mode='constant', pad_value=0):
+    max_dims = list() 
+    new_tensors = list() 
+
+    for i in range(len(tensors[0].shape)): 
+        dim_dif = max([tens.shape[i] for tens in tensors])
+        max_dims.append(dim_dif)
+    padded_sensors = []
+    for tensor in tensors:
+        og_shape = tensor.shape  
+        padding = [max_dims[i]-og_shape[i] for i in range(len(tensor.shape))] 
+        zero_pads = [0 for i in range(len(tensor.shape))] 
+        padding = zero_pads + padding
+        if sum(padding)==0:
+            padded_sensors.append(tensor)
+        else:
+            padded_sensor = F.pad(tensor, padding, mode=padding_mode, value=pad_value)
+            padded_sensors.append(padded_sensor)
+    return torch.stack(padded_sensors,dim=0)
+
+def pad_action_tokens(tensors): 
+    non_none_tensors = [e for e in tensors if e is not None] 
+    num_elem = len(tensors)
+    if len(non_none_tensors) ==0: 
+       return  torch.zeros(num_elem,1,256) 
+    else: 
+        prox_shape = non_none_tensors[0].shape 
+        return  pad_tensors([None if e is None else e  for e in tensors ])
+def pad_prompt_tokens(tensors): 
+    tens = [ e.unsqueeze(0) for e in tensors] 
+    return pad_tensors(tens)
+    
 def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,total_counter=0): 
     """ We train a model over the course of a single trajectory  
     policy  : Our Vima Policy model 
@@ -62,29 +95,38 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
        num_batches = len(prompt_infos)
        opti.zero_grad()
        total_loss =0 
-       for batch in range(num_batches):
-            traj_id = traj_ids[batch]
-            prompt_token_type = prompt_infos[batch][0]
-            word_batch = prompt_infos[batch][1]
-            image_batch = prompt_infos[batch][2]
-            obs = observations[batch]
-            oracle_action = actions[batch] 
-            #send everything to gpu 
-            word_batch = word_batch.to(device)
-            image_batch = image_batch.to_torch_tensor(device=device)
-            prompt_tokens, prompt_masks = policy.forward_prompt_assembly(
-                (prompt_token_type, word_batch, image_batch)
-                )
-            traj_inf_cache = batched_inference_cahce[traj_id]
-            traj_inf_cache['num_steps'] =trajectory_steps[batch] 
-            input_d = {
-                'prompt_tokens':prompt_tokens,
-                'prompt_masks':prompt_masks,
-                'obs':obs,
-                'oracle_action':oracle_action,
-            }
-            loss = simple_forward(policy=policy,inputs=input_d,inference_cache=traj_inf_cache,meta_info=meta_info,device=device)
-            total_loss = total_loss + loss
+       prompt_tokens = list() 
+       prompt_masks = list() 
+       actions_forward_l = list() 
+       obs_tokens_l = list() 
+       obs_mask_to_forward_l = list() 
+       for  i in range(num_batches): 
+           b_sample =  prompt_infos[i]
+           prompt_token_t, prompt_m  = process_prompt_tokens(policy,prompt_token_type=b_sample[0],word_batch=b_sample[1],image_batch=b_sample[2],device=device)
+           prompt_tokens.append(prompt_token_t)
+           prompt_masks.append(prompt_m)
+           token_proc_input = {'obs':observations[i],'meta_info':meta_infos[i]}
+           action_toks_to_forward,obs_tokens,obs_mask_to_forward = gen_individual_tokens(policy=policy,inputs=token_proc_input,inference_cache=batched_inference_cahce[traj_ids[i]],device=device)
+           actions_forward_l.append(action_toks_to_forward)
+           obs_tokens_l.append(obs_tokens)
+           obs_mask_to_forward_l.append(obs_mask_to_forward)
+       prompt_masks = pad_prompt_tokens(prompt_masks)
+       prompt_tokens = pad_prompt_tokens(prompt_tokens)
+       prompt_tokens = prompt_tokens.squeeze(1) 
+       prompt_tokens = prompt_tokens.squeeze(-2)
+       obs_tokens_l = pad_tensors(obs_tokens_l)
+       actions_forward_l= pad_action_tokens(actions_forward_l)
+       obs_mask_to_forward_l = pad_tensors(obs_mask_to_forward_l)
+       predicted_action_tokens = policy.forward(
+            obs_token=obs_tokens_l,
+            action_token=actions_forward_l,
+            prompt_token=prompt_tokens,
+            prompt_token_mask=prompt_masks,
+            obs_mask=obs_mask_to_forward_l,
+        )  # (L, B, E)
+       pdb.set_trace()
+       loss = simple_forward(policy=policy,inputs=input_d,inference_cache=mini_traj_cache,meta_info=meta_info,device=device)
+       total_loss = total_loss + loss
        writer.add_scalar("batch_loss",total_loss,global_step=step_counter)
        step_counter +=1 
        print(f" On Step {step_counter} loss: {total_loss:0.4} cache has len: {len(batched_inference_cahce)}",end='\r')
@@ -94,86 +136,91 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
        if len(batched_inference_cahce) >= 20:
            print("Clearing out cache")
            clear_cache(batched_inference_cahce)
+
+def process_prompt_tokens(policy,prompt_token_type,word_batch,image_batch,device): 
+    #send everything to gpu 
+    word_batch = word_batch.to(device)
+    image_batch = image_batch.to_torch_tensor(device=device)
+    prompt_tokens, prompt_masks = policy.forward_prompt_assembly(
+        (prompt_token_type, word_batch, image_batch)
+        )
+    return prompt_tokens,prompt_masks
+
 def action_to_device(action,device= None): 
     for e in action.keys(): 
         action[e] = action[e].to(device)
+def gen_individual_tokens(policy,inputs,inference_cache,device): 
+    c_step = len(inference_cache['obs_tokens'])
+    meta_info = inputs['meta_info']
+    obs = inputs['obs']
+    obs = add_batch_dim(obs)
+    obs = prepare_obs(obs=obs, rgb_dict=None, meta=meta_info).to_torch_tensor(
+        device=device
+        )
+    #this forward is to just encode stuff 
+    obs_token_this_step, obs_mask_this_step = policy.forward_obs_token(obs)
+    obs_token_this_step = obs_token_this_step.squeeze(0)
+    obs_mask_this_step = obs_mask_this_step.squeeze(0)
+    inference_cache["obs_tokens"].append(obs_token_this_step[0])
+    inference_cache["obs_masks"].append(obs_mask_this_step[0])
+    max_objs = max(x.shape[0] for x in inference_cache["obs_tokens"])
+    obs_tokens_to_forward, obs_masks_to_forward = [], []
+    obs_tokens_this_env, obs_masks_this_env = [], []
+    for idx in range(len(inference_cache["obs_tokens"])):
+        obs_this_env_this_step = inference_cache["obs_tokens"][idx]
+        obs_mask_this_env_this_step = inference_cache["obs_masks"][idx]
+        required_pad = max_objs - obs_this_env_this_step.shape[0]
+        obs_tokens_this_env.append(
+            any_concat(
+                [
+                    obs_this_env_this_step,
+                    torch.zeros(
+                        required_pad,
+                        obs_this_env_this_step.shape[1],
+                        device=device,
+                        dtype=obs_this_env_this_step.dtype,
+                    ),
+                ],
+                dim=0,
+            )
+        )
+        obs_masks_this_env.append(
+            any_concat(
+                [
+                    obs_mask_this_env_this_step,
+                    torch.zeros(
+                        required_pad,
+                        device=device,
+                        dtype=obs_mask_this_env_this_step.dtype,
+                    ),
+                ],
+                dim=0,
+            )
+        )
+    #stack the list 
+    obs_tokens_to_forward.append(any_stack(obs_tokens_this_env, dim=0))
+    obs_masks_to_forward.append(any_stack(obs_masks_this_env, dim=0))
+    obs_tokens_to_forward = any_stack(obs_tokens_to_forward, dim=0)
+    obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
+    obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1).squeeze(0)
+    obs_masks_to_forward = obs_masks_to_forward.transpose(0, 1).squeeze(0)
+    if c_step ==0: 
+        action_tokens_to_forward = None
+    else:
+        action_tokens_to_forward = any_stack(
+                [any_stack(inference_cache["action_tokens"], dim=0)],
+                dim=0,
+            )
+        action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
+
+    return action_tokens_to_forward,obs_tokens_to_forward,obs_masks_to_forward
+
+
 def simple_forward(policy,inputs,inference_cache,meta_info,device):
         #get the current observation  and preprocess it 
-        obs= inputs['obs'] 
-        oracle_action = inputs['oracle_action']
-        action_to_device(oracle_action,device=device)
-        c_step = len(inference_cache['obs_tokens'])
-        prompt_tokens = inputs['prompt_tokens']
-        prompt_masks = inputs['prompt_masks']
-        obs = inputs['obs']
-        obs = add_batch_dim(obs)
-        obs = prepare_obs(obs=obs, rgb_dict=None, meta=meta_info).to_torch_tensor(
-            device=device
-            )
         ################# BEGIN COMPLICATED FORWARD STEP ###########
-        obs_token_this_step, obs_mask_this_step = policy.forward_obs_token(obs)
-        obs_token_this_step = obs_token_this_step.squeeze(0)
-        obs_mask_this_step = obs_mask_this_step.squeeze(0)
-        inference_cache["obs_tokens"].append(obs_token_this_step[0])
-        inference_cache["obs_masks"].append(obs_mask_this_step[0])
-        max_objs = max(x.shape[0] for x in inference_cache["obs_tokens"])
-        obs_tokens_to_forward, obs_masks_to_forward = [], []
-        obs_tokens_this_env, obs_masks_this_env = [], []
-        for idx in range(len(inference_cache["obs_tokens"])):
-            obs_this_env_this_step = inference_cache["obs_tokens"][idx]
-            obs_mask_this_env_this_step = inference_cache["obs_masks"][idx]
-            required_pad = max_objs - obs_this_env_this_step.shape[0]
-            obs_tokens_this_env.append(
-                any_concat(
-                    [
-                        obs_this_env_this_step,
-                        torch.zeros(
-                            required_pad,
-                            obs_this_env_this_step.shape[1],
-                            device=device,
-                            dtype=obs_this_env_this_step.dtype,
-                        ),
-                    ],
-                    dim=0,
-                )
-            )
-            obs_masks_this_env.append(
-                any_concat(
-                    [
-                        obs_mask_this_env_this_step,
-                        torch.zeros(
-                            required_pad,
-                            device=device,
-                            dtype=obs_mask_this_env_this_step.dtype,
-                        ),
-                    ],
-                    dim=0,
-                )
-            )
-        #stack the list 
-        obs_tokens_to_forward.append(any_stack(obs_tokens_this_env, dim=0))
-        obs_masks_to_forward.append(any_stack(obs_masks_this_env, dim=0))
-        obs_tokens_to_forward = any_stack(obs_tokens_to_forward, dim=0)
-        obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
-        obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1)
-        obs_masks_to_forward = obs_masks_to_forward.transpose(0, 1)
-        if c_step ==0: 
-            action_tokens_to_forward = None
-        else:
-            action_tokens_to_forward = any_stack(
-                    [any_stack(inference_cache["action_tokens"], dim=0)],
-                    dim=0,
-                )
-            action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
         ### END complicated forward step 
         #the models actions are provided as a single embedding 
-        predicted_action_tokens = policy.forward(
-            obs_token=obs_tokens_to_forward,
-            action_token=action_tokens_to_forward,
-            prompt_token=prompt_tokens,
-            prompt_token_mask=prompt_masks,
-            obs_mask=obs_masks_to_forward,
-        )  # (L, B, E)
         predicted_action_tokens = predicted_action_tokens[-1].unsqueeze(0)
         # We discretize them into actual probabilities  of x,y,z placements 
         dist_dict = policy.forward_action_decoder(predicted_action_tokens)

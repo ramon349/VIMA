@@ -77,7 +77,7 @@ def data_proc_worker(task_queue, output_queue, quit_worker_event):
                 break
             c_obs = index_observation(obs, i)
             c_act = index_action(actions, i)
-            output_queue.put((traj_id, c_obs, c_act, prommpt_info,num_steps))
+            output_queue.put((traj_id, c_obs, c_act, prommpt_info,num_steps,traj_meta))
         if quit_worker_event.is_set():
             break
     output_queue.put(None)  # this is the signal we are done
@@ -142,20 +142,23 @@ class TrajectoryLoader:
         batch_episode_id = []
         batch_prompt_info = []
         num_steps = []
+        meta_infos = []
         for i in range(self.batch_size):
+            print(f"{self.n_steps_processed }",end='\r')
             workitem = self.output_queues[self.n_steps_processed % self.n_workers].get(
                 timeout=10
             )
             if workitem is None:
                 raise StopIteration()
-            traj_id, observation, action, prompt_info,num_step = workitem
+            traj_id, observation, action, prompt_info,num_step,meta_info  = workitem
             batch_observations.append(observation)
             batch_actions.append(action)
             batch_episode_id.append(traj_id)
             batch_prompt_info.append(prompt_info)
             num_steps.append(num_step)
+            meta_infos.append(meta_info)
             self.n_steps_processed += 1
-        return batch_episode_id, batch_observations, batch_actions, batch_prompt_info,num_steps
+        return batch_episode_id, batch_observations, batch_actions, batch_prompt_info,num_steps,meta_infos
 
     def __del__(self):
         for proc in self.processes:

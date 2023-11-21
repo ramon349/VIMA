@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os
+import os 
 import numpy as np
 from tokenizers import Tokenizer
 from tokenizers import AddedToken
@@ -13,173 +13,67 @@ from gym import Wrapper
 import torch
 import argparse
 
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+_kwargs = {
+    "single_word": True,
+    "lstrip": False,
+    "rstrip": False,
+    "normalized": True,
+}
 
-@torch.no_grad()
-def main(cfg):
-    assert cfg.partition in ALL_PARTITIONS
-    assert cfg.task in PARTITION_TO_SPECS["test"][cfg.partition]
+PLACEHOLDER_TOKENS = [
+    AddedToken("{base_obj}", **_kwargs),
+    AddedToken("{base_obj_1}", **_kwargs),
+    AddedToken("{base_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj}", **_kwargs),
+    AddedToken("{dragged_obj_1}", **_kwargs),
+    AddedToken("{dragged_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj_3}", **_kwargs),
+    AddedToken("{dragged_obj_4}", **_kwargs),
+    AddedToken("{dragged_obj_5}", **_kwargs),
+    AddedToken("{swept_obj}", **_kwargs),
+    AddedToken("{bounds}", **_kwargs),
+    AddedToken("{constraint}", **_kwargs),
+    AddedToken("{scene}", **_kwargs),
+    AddedToken("{demo_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_blicker_obj_3}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_3}", **_kwargs),
+    AddedToken("{start_scene}", **_kwargs),
+    AddedToken("{end_scene}", **_kwargs),
+    AddedToken("{before_twist_1}", **_kwargs),
+    AddedToken("{after_twist_1}", **_kwargs),
+    AddedToken("{before_twist_2}", **_kwargs),
+    AddedToken("{after_twist_2}", **_kwargs),
+    AddedToken("{before_twist_3}", **_kwargs),
+    AddedToken("{after_twist_3}", **_kwargs),
+    AddedToken("{frame_0}", **_kwargs),
+    AddedToken("{frame_1}", **_kwargs),
+    AddedToken("{frame_2}", **_kwargs),
+    AddedToken("{frame_3}", **_kwargs),
+    AddedToken("{frame_4}", **_kwargs),
+    AddedToken("{frame_5}", **_kwargs),
+    AddedToken("{frame_6}", **_kwargs),
+    AddedToken("{ring}", **_kwargs),
+    AddedToken("{hanoi_stand}", **_kwargs),
+    AddedToken("{start_scene_1}", **_kwargs),
+    AddedToken("{end_scene_1}", **_kwargs),
+    AddedToken("{start_scene_2}", **_kwargs),
+    AddedToken("{end_scene_2}", **_kwargs),
+    AddedToken("{start_scene_3}", **_kwargs),
+    AddedToken("{end_scene_3}", **_kwargs),
+]
+PLACEHOLDERS = [token.content for token in PLACEHOLDER_TOKENS]
+tokenizer = Tokenizer.from_pretrained("t5-base")
+tokenizer.add_tokens(PLACEHOLDER_TOKENS)
 
-    seed = 42
-    policy = create_policy_from_ckpt(cfg.ckpt, cfg.device)
-    env = TimeLimitWrapper(
-        ResetFaultToleranceWrapper(
-            make(
-                cfg.task,
-                modalities=["segm", "rgb"],
-                task_kwargs=PARTITION_TO_SPECS["test"][cfg.partition][cfg.task],
-                seed=seed,
-                render_prompt=True,
-                display_debug_window=True,
-                hide_arm_rgb=False,
-            )
-        ),
-        bonus_steps=2,
-    )
-
-    while True:
-        env.global_seed = seed
-
-        obs = env.reset()
-        env.render()
-
-        meta_info = env.meta_info
-        prompt = env.prompt
-        prompt_assets = env.prompt_assets
-        elapsed_steps = 0
-        inference_cache = {}
-        while True:
-            if elapsed_steps == 0:
-                prompt_token_type, word_batch, image_batch = prepare_prompt(
-                    prompt=prompt, prompt_assets=prompt_assets, views=["front", "top"]
-                )
-                word_batch = word_batch.to(cfg.device)
-                image_batch = image_batch.to_torch_tensor(device=cfg.device)
-                prompt_tokens, prompt_masks = policy.forward_prompt_assembly(
-                    (prompt_token_type, word_batch, image_batch)
-                )
-
-                inference_cache["obs_tokens"] = []
-                inference_cache["obs_masks"] = []
-                inference_cache["action_tokens"] = []
-            obs["ee"] = np.asarray(obs["ee"])
-            obs = add_batch_dim(obs)
-            obs = prepare_obs(obs=obs, rgb_dict=None, meta=meta_info).to_torch_tensor(
-                device=cfg.device
-            )
-            obs_token_this_step, obs_mask_this_step = policy.forward_obs_token(obs)
-            obs_token_this_step = obs_token_this_step.squeeze(0)
-            obs_mask_this_step = obs_mask_this_step.squeeze(0)
-            inference_cache["obs_tokens"].append(obs_token_this_step[0])
-            inference_cache["obs_masks"].append(obs_mask_this_step[0])
-            max_objs = max(x.shape[0] for x in inference_cache["obs_tokens"])
-            obs_tokens_to_forward, obs_masks_to_forward = [], []
-            obs_tokens_this_env, obs_masks_this_env = [], []
-            for idx in range(len(inference_cache["obs_tokens"])):
-                obs_this_env_this_step = inference_cache["obs_tokens"][idx]
-                obs_mask_this_env_this_step = inference_cache["obs_masks"][idx]
-                required_pad = max_objs - obs_this_env_this_step.shape[0]
-                obs_tokens_this_env.append(
-                    any_concat(
-                        [
-                            obs_this_env_this_step,
-                            torch.zeros(
-                                required_pad,
-                                obs_this_env_this_step.shape[1],
-                                device=cfg.device,
-                                dtype=obs_this_env_this_step.dtype,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                )
-                obs_masks_this_env.append(
-                    any_concat(
-                        [
-                            obs_mask_this_env_this_step,
-                            torch.zeros(
-                                required_pad,
-                                device=cfg.device,
-                                dtype=obs_mask_this_env_this_step.dtype,
-                            ),
-                        ],
-                        dim=0,
-                    )
-                )
-            obs_tokens_to_forward.append(any_stack(obs_tokens_this_env, dim=0))
-            obs_masks_to_forward.append(any_stack(obs_masks_this_env, dim=0))
-            obs_tokens_to_forward = any_stack(obs_tokens_to_forward, dim=0)
-            obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
-            obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1)
-            obs_masks_to_forward = obs_masks_to_forward.transpose(0, 1)
-
-            if elapsed_steps == 0:
-                action_tokens_to_forward = None
-            else:
-                action_tokens_to_forward = any_stack(
-                    [any_stack(inference_cache["action_tokens"], dim=0)],
-                    dim=0,
-                )
-                action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
-            predicted_action_tokens = policy.forward(
-                obs_token=obs_tokens_to_forward,
-                action_token=action_tokens_to_forward,
-                prompt_token=prompt_tokens,
-                prompt_token_mask=prompt_masks,
-                obs_mask=obs_masks_to_forward,
-            )  # (L, B, E)
-            predicted_action_tokens = predicted_action_tokens[-1].unsqueeze(
-                0
-            )  # (1, B, E)
-            dist_dict = policy.forward_action_decoder(predicted_action_tokens)
-            actions = {k: v.mode() for k, v in dist_dict.items()}
-            action_tokens = policy.forward_action_token(actions)  # (1, B, E)
-            action_tokens = action_tokens.squeeze(0)  # (B, E)
-            inference_cache["action_tokens"].append(action_tokens[0])
-            actions = policy._de_discretize_actions(actions)
-            action_bounds = [meta_info["action_bounds"]]
-            action_bounds_low = [action_bound["low"] for action_bound in action_bounds]
-            action_bounds_high = [
-                action_bound["high"] for action_bound in action_bounds
-            ]
-            action_bounds_low = np.asarray(action_bounds_low)
-            action_bounds_high = np.asarray(action_bounds_high)
-            action_bounds_low = torch.tensor(
-                action_bounds_low, dtype=torch.float32, device=cfg.device
-            )
-            action_bounds_high = torch.tensor(
-                action_bounds_high, dtype=torch.float32, device=cfg.device
-            )
-            actions["pose0_position"] = (
-                actions["pose0_position"] * (action_bounds_high - action_bounds_low)
-                + action_bounds_low
-            )
-            actions["pose1_position"] = (
-                actions["pose1_position"] * (action_bounds_high - action_bounds_low)
-                + action_bounds_low
-            )
-            actions["pose0_position"] = torch.clamp(
-                actions["pose0_position"], min=action_bounds_low, max=action_bounds_high
-            )
-            actions["pose1_position"] = torch.clamp(
-                actions["pose1_position"], min=action_bounds_low, max=action_bounds_high
-            )
-            actions["pose0_rotation"] = actions["pose0_rotation"] * 2 - 1
-            actions["pose1_rotation"] = actions["pose1_rotation"] * 2 - 1
-            actions["pose0_rotation"] = torch.clamp(
-                actions["pose0_rotation"], min=-1, max=1
-            )
-            actions["pose1_rotation"] = torch.clamp(
-                actions["pose1_rotation"], min=-1, max=1
-            )
-            actions = {k: v.cpu().numpy() for k, v in actions.items()}
-            actions = any_slice(actions, np.s_[0, 0])
-            obs, _, done, info = env.step(actions)
-            elapsed_steps += 1
-            if done:
-                break
-
-
+def action_to_device(action,device= None): 
+    for e in action.keys(): 
+        action[e] = action[e].to(device)
+        
 def prepare_prompt(*, prompt: str, prompt_assets: dict, views: list[str]):
     views = sorted(views)
     encoding = tokenizer.encode(prompt, add_special_tokens=True)
@@ -411,36 +305,3 @@ def prepare_obs(
     obs = obs.to_torch_tensor()
     obs = any_transpose_first_two_axes(obs)
     return obs
-
-
-class ResetFaultToleranceWrapper(Wrapper):
-    max_retries = 10
-
-    def __init__(self, env):
-        super().__init__(env)
-
-    def reset(self):
-        for _ in range(self.max_retries):
-            try:
-                return self.env.reset()
-            except:
-                current_seed = self.env.unwrapped.task.seed
-                self.env.global_seed = current_seed + 1
-        raise RuntimeError(
-            "Failed to reset environment after {} retries".format(self.max_retries)
-        )
-
-
-class TimeLimitWrapper(_TimeLimit):
-    def __init__(self, env, bonus_steps: int = 0):
-        super().__init__(env, env.task.oracle_max_steps + bonus_steps)
-
-
-if __name__ == "__main__":
-    arg = argparse.ArgumentParser()
-    arg.add_argument("--partition", type=str, default="placement_generalization")
-    arg.add_argument("--task", type=str, default="visual_manipulation")
-    arg.add_argument("--ckpt", type=str, required=True)
-    arg.add_argument("--device", default="cpu")
-    arg = arg.parse_args()
-    main(arg)

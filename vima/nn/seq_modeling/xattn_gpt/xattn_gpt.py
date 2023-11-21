@@ -8,7 +8,7 @@ from transformers.models.openai.modeling_openai import (
 )
 
 from .components import XAttention, Block
-
+import pdb 
 
 class XAttnGPT(OpenAIGPTPreTrainedModel):
     def __init__(
@@ -157,6 +157,7 @@ class XAttnGPT(OpenAIGPTPreTrainedModel):
         else:
             L_oa, B_oa, E_oa = obs_action_tokens.shape
             L_p, B_p, E_p = prompt_tokens.shape
+        pdb.set_trace()
         assert B_oa == B_p
         assert E_oa == E_p
         B = B_oa
