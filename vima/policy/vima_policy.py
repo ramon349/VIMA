@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from einops import rearrange
-
+import pdb 
 import vima.nn as vnn
 from ..utils import *
 
@@ -121,6 +121,13 @@ class VIMAPolicy(nn.Module):
         prompt_token: torch.Tensor,
         prompt_token_mask: torch.Tensor,
     ):
+        obs_token = rearrange(obs_token,"B L Q E -> L B Q E")
+        prompt_token = rearrange(prompt_token,"B L E -> L B E")
+        prompt_token_mask = rearrange(prompt_token_mask,"B L E -> L B E").squeeze(0).to(torch.bool)
+        obs_mask = rearrange(obs_mask,"B L E -> L B E")
+        if action_token is not None :
+            action_token = rearrange(action_token,"B L E -> L B E") 
+
         L_obs, B = obs_token.shape[:2]
         L_action = 0 if action_token is None else action_token.shape[0]
         n_max_objs = obs_token.shape[-2]

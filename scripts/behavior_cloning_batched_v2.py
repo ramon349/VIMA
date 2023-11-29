@@ -17,12 +17,9 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 from vima.trajectory.trajectory_dataset import TrajectoryLoader
 from collections import defaultdict
-
-class LruCacheTrajectories(): 
-    def __init__(self,capacity=10): 
-        self.store_dict = defaultdict(init_empty_cache_dict)
-        self.capacity = capacity 
-
+import torch.nn.functional as F
+from torch.optim import AdamW 
+from torch.optim.lr_scheduler import CosineAnnealingLR 
 
 def init_empty_cache_dict(): 
     new_d = dict() 
@@ -43,11 +40,9 @@ def clear_cache(inference_cache):
     return num_to_del
 
 
-import torch.nn.functional as F
 def pad_tensors(tensors, padding_mode='constant', pad_value=0):
     max_dims = list() 
     new_tensors = list() 
-
     for i in range(len(tensors[0].shape)): 
         dim_dif = max([tens.shape[i] for tens in tensors])
         max_dims.append(dim_dif)
@@ -60,8 +55,16 @@ def pad_tensors(tensors, padding_mode='constant', pad_value=0):
         if sum(padding)==0:
             padded_sensors.append(tensor)
         else:
-            padded_sensor = F.pad(tensor, padding, mode=padding_mode, value=pad_value)
+            #i do not like this put it will suffice 
+            if  sum([e !=0 for e in padding]) ==1 and padding[-1] !=0: 
+                padded_sensor = F.pad(tensor, [0,padding[-1]], mode=padding_mode, value=pad_value)
+            else: 
+                pdb.set_trace()
+                padded_sensor = F.pad(tensor, padding , mode=padding_mode, value=pad_value)
             padded_sensors.append(padded_sensor)
+    sanity_check = [padded_sensors[0].shape[i]==padded_sensors[1].shape[i] for i in range(len((padded_sensors[0].shape)))]
+    if not all(sanity_check): 
+        pdb.set_trace()
     return torch.stack(padded_sensors,dim=0)
 
 def pad_action_tokens(tensors): 
@@ -73,10 +76,55 @@ def pad_action_tokens(tensors):
         prox_shape = non_none_tensors[0].shape 
         return  pad_tensors([None if e is None else e  for e in tensors ])
 def pad_prompt_tokens(tensors): 
-    tens = [ e.unsqueeze(0) for e in tensors] 
+    tens = [ e.squeeze(1).unsqueeze(0) for e in tensors] 
     return pad_tensors(tens)
+def pad_all_tokens(tensors):
+    filler_token = None 
+    tens = list() 
+    filler_token = [e for e in tensors if e is not None][0]
+    for e in tensors: 
+        if e is None: 
+            tens.append(filler_token)
+        else: 
+            tens.append(e)
+    tens = [ e.squeeze(1).unsqueeze(0) for e in tens]  #swap out the batch dim 
+    shape_len = [e for e in range(len(tens[0].shape))] #this is the numer of dimensions: 
+    for i,dim in enumerate(shape_len):
+        largest_dim = max([k.shape[i] for k in tens])
+        tens = [ expand_dim(e,i,largest_dim) for e in tens ] 
+    new_tens = torch.cat(tens)
+
+    # shape_sums = [ e.numel() for e in tens] 
+    #max_sum = max(shape_sums)
+    #largest_shape_idx = shape_sums.index(max_sum) 
+    #new_tens = torch.cat([ max_pad(e,tens[largest_shape_idx]) for e in tens ] )
+    #dims =  [e for e in range(len(new_tens.shape))] 
+    #dims[1],dims[0] = dims[0],dims[1]
+    #new_tens = torch.permute(new_tens,dims)
+    return new_tens
+def expand_dim(ten_expand,dim_idx,dim_max): 
+    dev = ten_expand.device 
+    a_shape = torch.tensor(ten_expand.shape) 
+    size_diff = dim_max - a_shape[dim_idx] 
+    a_expand_shape = torch.tensor(ten_expand.shape) 
+    a_expand_shape[dim_idx] += size_diff 
+    new_b_t = torch.zeros(list(a_expand_shape),device=dev)
+    slices = [ slice(0,e) for e in a_shape] 
+    new_b_t[slices] = ten_expand
+    return new_b_t
+
+def max_pad(ten_expand,ten_large): 
+    a_shape = torch.tensor(ten_expand.shape)
+    b_shape = torch.tensor(ten_large.shape)
+    dev = ten_expand.device
+    size_diffs = b_shape - a_shape
+    new_b = a_shape + size_diffs 
+    new_b_t = torch.zeros(list(new_b),device=dev)
+    slices = [ slice(0,e) for e in a_shape] 
+    new_b_t[slices] = ten_expand
+    return new_b_t
     
-def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,total_counter=0): 
+def model_train(policy,data_loader=None,device='cuda:0',lr_sch=None,opti=None,writer=None,total_counter=0): 
     """ We train a model over the course of a single trajectory  
     policy  : Our Vima Policy model 
     traj_info:  Dictionary containing RGB Images, Trjaectory information etc 
@@ -91,6 +139,7 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
     meta_info = env.meta_info 
     batched_inference_cahce = defaultdict(init_empty_cache_dict)
     step_counter = 0 
+    warmup = 7000
     for traj_ids,observations,actions ,prompt_infos ,trajectory_steps,meta_infos in data_loader: 
        num_batches = len(prompt_infos)
        opti.zero_grad()
@@ -110,13 +159,16 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
            actions_forward_l.append(action_toks_to_forward)
            obs_tokens_l.append(obs_tokens)
            obs_mask_to_forward_l.append(obs_mask_to_forward)
-       prompt_masks = pad_prompt_tokens(prompt_masks)
-       prompt_tokens = pad_prompt_tokens(prompt_tokens)
-       prompt_tokens = prompt_tokens.squeeze(1) 
-       prompt_tokens = prompt_tokens.squeeze(-2)
-       obs_tokens_l = pad_tensors(obs_tokens_l)
-       actions_forward_l= pad_action_tokens(actions_forward_l)
-       obs_mask_to_forward_l = pad_tensors(obs_mask_to_forward_l)
+       prompt_masks = pad_all_tokens(prompt_masks)
+       prompt_tokens = pad_all_tokens(prompt_tokens)
+       #prompt_tokens = prompt_tokens.squeeze(1) 
+       #prompt_tokens = prompt_tokens.squeeze(-2)
+       obs_tokens_l = pad_all_tokens(obs_tokens_l)
+       if not all([e is None for e in actions_forward_l]):
+           actions_forward_l= pad_all_tokens(actions_forward_l)
+       else:
+           actions_forward_l = None 
+       obs_mask_to_forward_l = pad_all_tokens(obs_mask_to_forward_l)
        predicted_action_tokens = policy.forward(
             obs_token=obs_tokens_l,
             action_token=actions_forward_l,
@@ -124,16 +176,47 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
             prompt_token_mask=prompt_masks,
             obs_mask=obs_mask_to_forward_l,
         )  # (L, B, E)
-       pdb.set_trace()
-       loss = simple_forward(policy=policy,inputs=input_d,inference_cache=mini_traj_cache,meta_info=meta_info,device=device)
-       total_loss = total_loss + loss
+       dist_dict = policy.forward_action_decoder(predicted_action_tokens)
+       action_probs = dict() 
+       for k,v in dist_dict.items(): 
+           action_probs[k] = list() 
+           for  dist in v._dists:
+                acti_prob = dist.probs
+                action_probs[k].append(acti_prob)
+       ## this al for determing the next action 
+       batch_size = predicted_action_tokens.shape[1] 
+       total_loss=0.0
+       for e in range(batch_size): 
+           action_probs = dict() 
+           for k,v in dist_dict.items(): 
+               action_probs[k] = list() 
+               for dist in v._dists: 
+                   acti_prob = dist.probs[0][e] 
+                   action_probs[k].append(acti_prob)
+           oracle_action = actions[e] 
+           action_to_device(oracle_action,device=device)
+           action_tokens = policy.forward_action_token(oracle_action)  # (1, B, E)
+           action_tokens = action_tokens.squeeze(0)  # (B, E)
+           batched_inference_cahce[traj_ids[e]]["action_tokens"].append(action_tokens) # we append the oracles action not the models action to history 
+           dec = policy.discretize_action(oracle_action)
+           for k in dist_dict.keys(): 
+               for d in range(len(action_probs[k])): 
+                   indiv_prob = action_probs[k][d].view((-1,))
+                   discrete_index = dec[k][d] 
+                   loss = calc_nll(indiv_prob,discrete_index)
+                   total_loss += loss 
        writer.add_scalar("batch_loss",total_loss,global_step=step_counter)
        step_counter +=1 
        print(f" On Step {step_counter} loss: {total_loss:0.4} cache has len: {len(batched_inference_cahce)}",end='\r')
-       #TODO add model saving here after some time
        total_loss.backward() 
        opti.step()
-       if len(batched_inference_cahce) >= 20:
+       lr_sch.step() 
+       for e in opti.param_groups:
+           if step_counter < warmup: 
+             e['lr'] = e['lr'] * (step_counter/warmup)
+           else: 
+             e['lr'] = e['lr']  
+       if len(batched_inference_cahce) >= 80:
            print("Clearing out cache")
            clear_cache(batched_inference_cahce)
 
@@ -278,16 +361,16 @@ def init_summary_writter(summary_dir):
 
 def main(): 
     seed = 42
-    summary_dir ="/home/rlcorrea/CSE574_project_vima/model_logs_demo"
+    summary_dir ="/scratch/rlcorrea/model_logs_demo"
     #Path to the trajectories 
     traj_folder = "/scratch/rlcorrea/vima_v6/rearrange_then_restore/"
     dl = TrajectoryLoader(
         traj_folder=traj_folder,
         traj_name="rearrange_then_restore",
-        n_workers=2,
-        batch_size=2,
+        n_workers=64,
+        batch_size=64,
         n_epochs=1,
-        max_queue_size=20,
+        max_queue_size=300,
     )
     device = 'cuda:0'
     #This are the  parameters for the  model used in the 2M configuration 
@@ -305,8 +388,9 @@ def main():
     for n,e in policy.xattn_gpt.named_parameters(): 
         e.requires_grad = True 
     policy = policy.to(device)
-    opti = Adam(policy.parameters(),lr=0.1)
-    model_train(policy=policy,data_loader = dl,device='cuda:0',opti=opti,writer=writer,total_counter=0)
+    opti = AdamW(policy.parameters(),lr=0.0001)
+    lr_schedule = CosineAnnealingLR(opti,T_max=17_000)
+    model_train(policy=policy,data_loader = dl,device='cuda:0',opti=opti,lr_sch=lr_schedule,writer=writer,total_counter=0)
     torch.save(policy.state_dict(),weight_path)
 
 if __name__ == "__main__":

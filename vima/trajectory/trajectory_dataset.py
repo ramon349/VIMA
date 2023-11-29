@@ -144,7 +144,6 @@ class TrajectoryLoader:
         num_steps = []
         meta_infos = []
         for i in range(self.batch_size):
-            print(f"{self.n_steps_processed }",end='\r')
             workitem = self.output_queues[self.n_steps_processed % self.n_workers].get(
                 timeout=10
             )
@@ -168,7 +167,7 @@ class TrajectoryLoader:
     def set_trajectory_map(self):
         folder = self.trajectory_folder
         from pathlib import Path 
-        traj_folders = [str(e) for e in Path(folder).glob("*")]
+        traj_folders = sorted([str(e) for e in Path(folder).glob("*")])
         folder_map = dict()
         folder_map = {
             e.split("/")[-1]: e for e in traj_folders if not e.endswith(".pkl")

@@ -130,3 +130,7 @@ dmypy.json
 
 # extra viles 
 *.mp4
+*.txt 
+*.out 
+*.err 
+

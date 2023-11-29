@@ -13,16 +13,13 @@ from PIL import Image
 from example import prepare_prompt,prepare_obs
 import torch 
 from torch.optim import Adam 
-from vima.policy.vima_policy  import VIMAPolicy 
+from vima.policy.vima_policy  import VIMAPolicy
+from vima.policy.vima_flamingo_policy import VIMAFlamingoPolicy 
 from pathlib import Path 
 from torch.utils.tensorboard import SummaryWriter
 from vima.trajectory.trajectory_dataset import TrajectoryLoader
 from collections import defaultdict
-
-class LruCacheTrajectories(): 
-    def __init__(self,capacity=10): 
-        self.store_dict = defaultdict(init_empty_cache_dict)
-        self.capacity = capacity 
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def init_empty_cache_dict(): 
@@ -43,7 +40,7 @@ def clear_cache(inference_cache):
             del inference_cache[k]  
     return num_to_del
 
-def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,total_counter=0): 
+def model_train(policy,data_loader=None,device='cuda:0',lr_sch=None,opti=None,writer=None,total_counter=0,config=None): 
     """ We train a model over the course of a single trajectory  
     policy  : Our Vima Policy model 
     traj_info:  Dictionary containing RGB Images, Trjaectory information etc 
@@ -58,6 +55,8 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
     meta_info = env.meta_info 
     batched_inference_cahce = defaultdict(init_empty_cache_dict)
     step_counter = 0 
+    warmup = config['warmup']
+    lr = config['lr']
     for traj_ids,observations,actions ,prompt_infos ,trajectory_steps,meta_infos in data_loader: 
        num_batches = len(prompt_infos)
        opti.zero_grad()
@@ -91,8 +90,10 @@ def model_train(policy,data_loader=None,device='cuda:0',opti=None,writer=None,to
        #TODO add model saving here after some time
        total_loss.backward() 
        opti.step()
-       if len(batched_inference_cahce) >= 20:
-           print("Clearing out cache")
+       lr_sch.step()
+       for e in opti.param_groups:
+           e['lr'] = e['lr'] * (step_counter/warmup) 
+       if len(batched_inference_cahce) >= 200:
            clear_cache(batched_inference_cahce)
 def action_to_device(action,device= None): 
     for e in action.keys(): 
@@ -157,6 +158,7 @@ def simple_forward(policy,inputs,inference_cache,meta_info,device):
         obs_masks_to_forward = any_stack(obs_masks_to_forward, dim=0)
         obs_tokens_to_forward = obs_tokens_to_forward.transpose(0, 1)
         obs_masks_to_forward = obs_masks_to_forward.transpose(0, 1)
+        print(f"---Start Batch ---")
         if c_step ==0: 
             action_tokens_to_forward = None
         else:
@@ -165,8 +167,14 @@ def simple_forward(policy,inputs,inference_cache,meta_info,device):
                     dim=0,
                 )
             action_tokens_to_forward = action_tokens_to_forward.transpose(0, 1)
+            print(f"Shape of actions: {action_tokens_to_forward.shape}")
         ### END complicated forward step 
         #the models actions are provided as a single embedding 
+        print(f"Shape of obs: {obs_tokens_to_forward.shape}")
+        print(f"Shape Prompt tokens:{prompt_tokens.shape} ")
+        print(f"Shape Prompt mask tokens:{prompt_masks.shape} ")
+        print(f"Shape Observation mask tokens:{obs_masks_to_forward.shape} ")
+        print(f"---End Batch ---")
         predicted_action_tokens = policy.forward(
             obs_token=obs_tokens_to_forward,
             action_token=action_tokens_to_forward,
@@ -200,11 +208,9 @@ def simple_forward(policy,inputs,inference_cache,meta_info,device):
         return l 
 
 def calc_nll(model_probabilities,true_index):
-    criterion = torch.nn.BCELoss() 
-    label = torch.zeros(model_probabilities.shape,device='cuda')
-    label[true_index]=1
-    loss = criterion(model_probabilities,label)
-    return loss 
+    other_crit = torch.nn.CrossEntropyLoss()
+    other_loss = other_crit(model_probabilities,true_index)
+    return other_loss
 
 
 def init_summary_writter(summary_dir): 
@@ -228,23 +234,26 @@ def init_summary_writter(summary_dir):
     return writer,weight_path
 
 
-
 def main(): 
-    seed = 42
     summary_dir ="/home/rlcorrea/CSE574_project_vima/model_logs_demo"
     #Path to the trajectories 
     traj_folder = "/scratch/rlcorrea/vima_v6/rearrange_then_restore/"
     dl = TrajectoryLoader(
         traj_folder=traj_folder,
         traj_name="rearrange_then_restore",
-        n_workers=2,
-        batch_size=2,
+        n_workers=20,
+        batch_size=128,
         n_epochs=1,
-        max_queue_size=20,
+        max_queue_size=30,
     )
+    train_config = {'device':'cuda:0',
+                    'lr': 0.0001,
+                    'warmup':7_000,
+                    'vima_config':{'embed_dim': 256, 'xf_n_layers': 1, 'sattn_n_heads': 8, 'xattn_n_heads': 8} 
+                    }
     device = 'cuda:0'
     #This are the  parameters for the  model used in the 2M configuration 
-    vima_config = {'embed_dim': 256, 'xf_n_layers': 1, 'sattn_n_heads': 8, 'xattn_n_heads': 8}
+    vima_config =  train_config['vima_config']
     policy =  VIMAPolicy(**vima_config) 
     weight_path = "/home/rlcorrea/CSE574_project_vima/model_weights/2M.ckpt"
     ckpt = torch.load(weight_path,map_location=device) 
@@ -258,8 +267,10 @@ def main():
     for n,e in policy.xattn_gpt.named_parameters(): 
         e.requires_grad = True 
     policy = policy.to(device)
-    opti = Adam(policy.parameters(),lr=0.1)
-    model_train(policy=policy,data_loader = dl,device='cuda:0',opti=opti,writer=writer,total_counter=0)
+    opti = Adam(policy.parameters(),lr=train_config['lr'])
+    lr_schedule = CosineAnnealingLR(opti,T_max=17_000)
+    #lr_with_warm = create_lr_scheduler_with_warmup(lr_schedule,warmup_duration=warmup_steps,warmup_start_value=0.0,warmup_end_value=0.0001)
+    model_train(policy=policy,data_loader = dl,opti=opti,lr_sch=lr_schedule,writer=writer,total_counter=0,config=train_config)
     torch.save(policy.state_dict(),weight_path)
 
 if __name__ == "__main__":
