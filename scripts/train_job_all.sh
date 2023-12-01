@@ -1,9 +1,9 @@
 #!/bin/bash
  
 #SBATCH -N 1  # number of nodes
-#SBATCH -c 4  # number of cores to allocate
-#SBATCH --mem=10G
-#SBATCH -t 0-12:00:00   # time in d-hh:mm:ss
+#SBATCH -c 8  # number of cores to allocate
+#SBATCH --mem=64G
+#SBATCH -t 0-09:00:00   # time in d-hh:mm:ss
 #SBATCH -p general       # partition 
 #SBATCH --gres=gpu:1
 #SBATCH -o slurm.%j.out # file to save job's STDOUT (%j = JobId)
@@ -19,4 +19,4 @@ module load mamba
 source activate my_vima 
 
 cd /home/rlcorrea/CSE574_project_vima/VIMA/scripts
-python3 behavior_cloning_batched_v2.py
+python3 behavior_cloning_batched_v3.py

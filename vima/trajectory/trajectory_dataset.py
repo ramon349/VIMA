@@ -16,6 +16,7 @@ import numpy as np
 import pdb
 import pickle as pkl
 from torch.utils.data import ConcatDataset, DataLoader
+from pathlib import Path  
 
 
 def index_observation(obs_d, index):
@@ -60,7 +61,11 @@ def data_proc_worker(task_queue, output_queue, quit_worker_event):
         if task is None:  # needed in case queue becomes empty
             break
         traj_id, traj_path = task
-        traj_dict = load_trajectory_info(traj_path)
+        try: 
+            traj_dict = load_trajectory_info(traj_path)
+        except: 
+           print(f"Skipping due to load failure")
+           continue  
         traj_meta = traj_dict["traj_meta"]
         num_steps = traj_meta["steps"]
         prompt = traj_dict["prompt"]
@@ -102,6 +107,7 @@ class TrajectoryLoader:
         # do some setting
         self.set_trajectory_map()
         self.trajectory_ids = list(self.folder_map.keys())
+        print(f"We have this many ids: {len(self.trajectory_ids)}")
         # we need to make the dataset repeatble so we will actually repeat the trajectoryids so we can sample from them
         self.trajectories_2_sample = list()
 
@@ -144,9 +150,12 @@ class TrajectoryLoader:
         num_steps = []
         meta_infos = []
         for i in range(self.batch_size):
-            workitem = self.output_queues[self.n_steps_processed % self.n_workers].get(
-                timeout=10
-            )
+            try: 
+                workitem = self.output_queues[self.n_steps_processed % self.n_workers].get(
+                    timeout=10
+                )
+            except: 
+                workitem=None
             if workitem is None:
                 raise StopIteration()
             traj_id, observation, action, prompt_info,num_step,meta_info  = workitem
@@ -166,34 +175,28 @@ class TrajectoryLoader:
 
     def set_trajectory_map(self):
         folder = self.trajectory_folder
-        from pathlib import Path 
-        traj_folders = sorted([str(e) for e in Path(folder).glob("*")])
+        traj_folders = sorted([str(e) for e in Path(folder).glob("*/*")])
         folder_map = dict()
         folder_map = {
-            e.split("/")[-1]: e for e in traj_folders if not e.endswith(".pkl")
-        }
+            "_".join(e.split("/")[-2:]): e for e in traj_folders if not e.endswith(".pkl")
+        } 
         self.folder_map = folder_map
 
 
 def main():
-    traj_folder = "/scratch/rlcorrea/vima_v6/rearrange_then_restore/*"
-    # filter out the metadata.pkl from our list of trajectory folders
-    dl = TrajectoryLoader(
-        traj_folder=traj_folder,
-        traj_name="rearrange_then_restore",
-        n_workers=2,
-        batch_size=2,
-        n_epochs=1,
-        max_queue_size=20,
-    )
-    for e in dl:
-        #what is the batchsize looking like 
-        # e[0] is the trajectory_id 
-        # e[1] is the observations 
-        # e[2] is the actions 
-        # e[3] should be the prompt info
-        pdb.set_trace() 
+    traj_folder = "/scratch/rlcorrea/vima_v6/rotate/*"
+    good_names = list() 
+    for e in sorted(glob(traj_folder))[0:500]: 
+        try: 
+            smaple = load_trajectory_info(e)  
+            good_names.append(e) 
+        except: 
+            print('failed')
+    with open('good_names.txt','w') as f: 
+        for e in good_names:
+            print(e,file=f)
 
+    # filter out the metadata.pkl from our list of trajectory folders
 
 if __name__ == "__main__":
     main()

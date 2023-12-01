@@ -16,6 +16,7 @@ class VIMAPolicy(nn.Module):
         xf_n_layers: int,
         sattn_n_heads: int,
         xattn_n_heads: int,
+        batch_infer = False,
     ):
         super().__init__()
 
@@ -112,6 +113,7 @@ class VIMAPolicy(nn.Module):
         self._n_discrete_y_bins = 100
         self._n_discrete_z_bins = 50
         self._n_discrete_rot_bins = 50
+        self.batch_infer = batch_infer
 
     def forward(
         self,
@@ -120,13 +122,14 @@ class VIMAPolicy(nn.Module):
         action_token: torch.Tensor | None,
         prompt_token: torch.Tensor,
         prompt_token_mask: torch.Tensor,
-    ):
-        obs_token = rearrange(obs_token,"B L Q E -> L B Q E")
-        prompt_token = rearrange(prompt_token,"B L E -> L B E")
-        prompt_token_mask = rearrange(prompt_token_mask,"B L E -> L B E").squeeze(0).to(torch.bool)
-        obs_mask = rearrange(obs_mask,"B L E -> L B E")
-        if action_token is not None :
-            action_token = rearrange(action_token,"B L E -> L B E") 
+    ): 
+        if self.batch_infer: 
+            obs_token = rearrange(obs_token,"B L Q E -> L B Q E")
+            prompt_token = rearrange(prompt_token,"B L E -> L B E")
+            prompt_token_mask = rearrange(prompt_token_mask,"B L E -> L B E").squeeze(0).to(torch.bool)
+            obs_mask = rearrange(obs_mask,"B L E -> L B E")
+            if action_token is not None :
+                action_token = rearrange(action_token,"B L E -> L B E") 
 
         L_obs, B = obs_token.shape[:2]
         L_action = 0 if action_token is None else action_token.shape[0]

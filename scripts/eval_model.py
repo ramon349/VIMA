@@ -1,5 +1,7 @@
 from __future__ import annotations
+import sys
 import os
+import pdb 
 import numpy as np
 from tokenizers import Tokenizer
 from tokenizers import AddedToken
@@ -12,38 +14,144 @@ from gym.wrappers import TimeLimit as _TimeLimit
 from gym import Wrapper
 import torch
 import argparse
+import mediapy as media 
+from vima_bench.env.wrappers.recorder import GUIRecorder
+import pdb
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
+_kwargs = {
+    "single_word": True,
+    "lstrip": False,
+    "rstrip": False,
+    "normalized": True,
+}
 
+
+PLACEHOLDER_TOKENS = [
+    AddedToken("{base_obj}", **_kwargs),
+    AddedToken("{base_obj_1}", **_kwargs),
+    AddedToken("{base_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj}", **_kwargs),
+    AddedToken("{dragged_obj_1}", **_kwargs),
+    AddedToken("{dragged_obj_2}", **_kwargs),
+    AddedToken("{dragged_obj_3}", **_kwargs),
+    AddedToken("{dragged_obj_4}", **_kwargs),
+    AddedToken("{dragged_obj_5}", **_kwargs),
+    AddedToken("{swept_obj}", **_kwargs),
+    AddedToken("{bounds}", **_kwargs),
+    AddedToken("{constraint}", **_kwargs),
+    AddedToken("{scene}", **_kwargs),
+    AddedToken("{demo_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_1}", **_kwargs),
+    AddedToken("{demo_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_2}", **_kwargs),
+    AddedToken("{demo_blicker_obj_3}", **_kwargs),
+    AddedToken("{demo_less_blicker_obj_3}", **_kwargs),
+    AddedToken("{start_scene}", **_kwargs),
+    AddedToken("{end_scene}", **_kwargs),
+    AddedToken("{before_twist_1}", **_kwargs),
+    AddedToken("{after_twist_1}", **_kwargs),
+    AddedToken("{before_twist_2}", **_kwargs),
+    AddedToken("{after_twist_2}", **_kwargs),
+    AddedToken("{before_twist_3}", **_kwargs),
+    AddedToken("{after_twist_3}", **_kwargs),
+    AddedToken("{frame_0}", **_kwargs),
+    AddedToken("{frame_1}", **_kwargs),
+    AddedToken("{frame_2}", **_kwargs),
+    AddedToken("{frame_3}", **_kwargs),
+    AddedToken("{frame_4}", **_kwargs),
+    AddedToken("{frame_5}", **_kwargs),
+    AddedToken("{frame_6}", **_kwargs),
+    AddedToken("{ring}", **_kwargs),
+    AddedToken("{hanoi_stand}", **_kwargs),
+    AddedToken("{start_scene_1}", **_kwargs),
+    AddedToken("{end_scene_1}", **_kwargs),
+    AddedToken("{start_scene_2}", **_kwargs),
+    AddedToken("{end_scene_2}", **_kwargs),
+    AddedToken("{start_scene_3}", **_kwargs),
+    AddedToken("{end_scene_3}", **_kwargs),
+]
+PLACEHOLDERS = [token.content for token in PLACEHOLDER_TOKENS]
+tokenizer = Tokenizer.from_pretrained("t5-base")
+tokenizer.add_tokens(PLACEHOLDER_TOKENS)
+from collections import defaultdict
+class VimaRecorder(object): 
+    def __init__(self,orientation='front',space='rgb',num_episodes=10) -> None:
+        self.orientation = 'front' 
+        self.space = space 
+        self.orientation = orientation 
+        self.num_episodes=num_episodes 
+        self._current_ep = 0  
+        self.episodes=  defaultdict(list)
+        self.isOpen = True 
+    def add_step(self,obs,done): 
+        current_frame = self.get_frame(obs) 
+        if  self.isOpen: 
+            self.episodes[self._current_ep].append(current_frame) 
+        if self.isOpen and done: 
+            self._current_ep +=1 
+        if self._current_ep > self.num_episodes: 
+            self.isOpen = False  
+        
+    def get_frame(self,obs): 
+        arr = obs[self.space][self.orientation] 
+        #resturcture it so its in the same form as expected by matplotlib 
+        re_orient = np.moveaxis(arr,[0,1,2],[2,0,1])
+        return re_orient
+
+from  vima.policy.vima_policy import VIMAPolicy
 @torch.no_grad()
 def main(cfg):
-    assert cfg.partition in ALL_PARTITIONS
-    assert cfg.task in PARTITION_TO_SPECS["test"][cfg.partition]
-
-    seed = 42
-    policy = create_policy_from_ckpt(cfg.ckpt, cfg.device)
+    print(ALL_PARTITIONS)
+    print(cfg.partition)
+    #assert cfg.partition in ALL_PARTITIONS
+    #assert cfg.task in PARTITION_TO_SPECS["train"]['rotate']
+    model_name = 'mineBig'
+    if  model_name=='baseline1':
+        vima_config = {'embed_dim': 256, 'xf_n_layers': 1, 'sattn_n_heads': 8, 'xattn_n_heads': 8}
+        policy =  VIMAPolicy(**vima_config) 
+        ck = torch.load('/home/rlcorrea/CSE574_project_vima/model_weights/2M.ckpt')
+        policy.load_state_dict({k.replace("policy.",""):v for k,v in ck['state_dict'].items()} )
+    if model_name=='baseline2':
+        vima_config = {'embed_dim': 768, 'xf_n_layers': 11, 'sattn_n_heads': 24, 'xattn_n_heads': 24,'batch_infer':False}
+        policy =  VIMAPolicy(**vima_config) 
+        ck = torch.load('/home/rlcorrea/CSE574_project_vima/model_weights/200M.ckpt')
+        policy.load_state_dict({k.replace("policy.",""):v for k,v in ck['state_dict'].items()} )
+    if model_name =='mine':
+        vima_config = {'embed_dim': 256, 'xf_n_layers': 1, 'sattn_n_heads': 8, 'xattn_n_heads': 8}
+        policy =  VIMAPolicy(**vima_config) 
+        ck = torch.load("/scratch/rlcorrea/model_weghts/behavior_clone_demo/version_17/w.ckpt")
+        policy.load_state_dict(ck)
+    if model_name =='mineBig':
+        vima_config = {'embed_dim': 768, 'xf_n_layers': 11, 'sattn_n_heads': 24, 'xattn_n_heads': 24,'batch_infer':False}
+        policy =  VIMAPolicy(**vima_config) 
+        ck = torch.load("/scratch/rlcorrea/model_weghts/behavior_clone_demo_200M_redo/version_2/w.ckpt",map_location='cpu')
+        policy.load_state_dict(ck['state_dict'])
+    policy = policy.to('cuda:0')
+    num_experiments = 10 
+    success_count = 0 
     env = TimeLimitWrapper(
         ResetFaultToleranceWrapper(
             make(
                 cfg.task,
                 modalities=["segm", "rgb"],
-                task_kwargs=PARTITION_TO_SPECS["test"][cfg.partition][cfg.task],
-                seed=seed,
-                render_prompt=True,
-                display_debug_window=True,
+                task_kwargs=PARTITION_TO_SPECS["train"]['rotate'],
+                seed=349,
+                render_prompt=False,
+                display_debug_window=False,
                 hide_arm_rgb=False,
+                record_gui=False,
+                record_kwargs={'video_fps':10,'video_name':'gui_record.mp4'}
             )
         ),
         bonus_steps=2,
-    )
-
-    while True:
-        env.global_seed = seed
-
+    ) 
+    while  num_experiments>0:
+        seed = num_experiments 
+        env.global_seed = 349
         obs = env.reset()
-        env.render()
-
-        meta_info = env.meta_info
+        meta_info = env.meta_info  
         prompt = env.prompt
         prompt_assets = env.prompt_assets
         elapsed_steps = 0
@@ -54,9 +162,9 @@ def main(cfg):
                     prompt=prompt, prompt_assets=prompt_assets, views=["front", "top"]
                 )
                 word_batch = word_batch.to(cfg.device)
-                image_batch = image_batch.to_torch_tensor(device=cfg.device)
+                image_batch = image_batch.to_torch_tensor(device='cuda:0')
                 prompt_tokens, prompt_masks = policy.forward_prompt_assembly(
-                    (prompt_token_type, word_batch, image_batch)
+                    (prompt_token_type, word_batch.to('cuda'), image_batch)
                 )
 
                 inference_cache["obs_tokens"] = []
@@ -174,10 +282,13 @@ def main(cfg):
             )
             actions = {k: v.cpu().numpy() for k, v in actions.items()}
             actions = any_slice(actions, np.s_[0, 0])
-            obs, _, done, info = env.step(actions)
+            obs, reward, done, info = env.step(actions)
             elapsed_steps += 1
             if done:
-                break
+                success_count += int(info['success'])
+                num_experiments -= 1 
+                break  
+    print(f" My Experiment is done i completed : {success_count}")
 
 
 def prepare_prompt(*, prompt: str, prompt_assets: dict, views: list[str]):
@@ -273,7 +384,7 @@ def prepare_prompt(*, prompt: str, prompt_assets: dict, views: list[str]):
                 }
                 # add mask
                 token["mask"] = {
-                    view: np.ones((n_objs_prompt[view],), dtype=np.bool_)
+                    view: np.ones((n_objs_prompt[view],), dtype=bool)
                     for view in views
                 }
                 n_objs_to_pad = {
@@ -293,7 +404,7 @@ def prepare_prompt(*, prompt: str, prompt_assets: dict, views: list[str]):
                         for view in views
                     },
                     "mask": {
-                        view: np.zeros((n_objs_to_pad[view]), dtype=np.bool_)
+                        view: np.zeros((n_objs_to_pad[view]), dtype=bool)
                         for view in views
                     },
                 }
@@ -439,8 +550,8 @@ class TimeLimitWrapper(_TimeLimit):
 if __name__ == "__main__":
     arg = argparse.ArgumentParser()
     arg.add_argument("--partition", type=str, default="placement_generalization")
-    arg.add_argument("--task", type=str, default="visual_manipulation")
-    arg.add_argument("--ckpt", type=str, required=True)
-    arg.add_argument("--device", default="cpu")
+    arg.add_argument("--task", type=str, default="rotate")
+    arg.add_argument("--ckpt", type=str, required=False)
+    arg.add_argument("--device", default="cuda:0")
     arg = arg.parse_args()
     main(arg)

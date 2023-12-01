@@ -93,13 +93,6 @@ def pad_all_tokens(tensors):
         tens = [ expand_dim(e,i,largest_dim) for e in tens ] 
     new_tens = torch.cat(tens)
 
-    # shape_sums = [ e.numel() for e in tens] 
-    #max_sum = max(shape_sums)
-    #largest_shape_idx = shape_sums.index(max_sum) 
-    #new_tens = torch.cat([ max_pad(e,tens[largest_shape_idx]) for e in tens ] )
-    #dims =  [e for e in range(len(new_tens.shape))] 
-    #dims[1],dims[0] = dims[0],dims[1]
-    #new_tens = torch.permute(new_tens,dims)
     return new_tens
 def expand_dim(ten_expand,dim_idx,dim_max): 
     dev = ten_expand.device 
@@ -339,7 +332,7 @@ def main():
     summary_dir ="/scratch/rlcorrea/model_logs_demo_200M_redo"
     #Path to the trajectories 
     #traj_folder = "/scratch/rlcorrea/vima_v6/rearrange_then_restore/"
-    traj_folder = "/scratch/rlcorrea/vima_v6/rotate/"
+    traj_folder = "/scratch/rlcorrea/vima_v6/"
     dl = TrajectoryLoader(
         traj_folder=traj_folder,
         traj_name="rotate",
@@ -355,8 +348,6 @@ def main():
     og_weight_path = "/home/rlcorrea/CSE574_project_vima/model_weights/200M.ckpt"
     ckpt = torch.load(og_weight_path,map_location=device) 
     policy.load_state_dict({k.replace('policy.',""):v for k,v in ckpt['state_dict'].items() if 'xattn_gpt' not in k},strict=False)
-    #policy.load_state_dict(ckpt) 
-    #{k.replace('policy.',""):v for k,v in ckpt['state_dict'].items() if 'xattn_gpt' not in k},strict=False)
     policy = policy.train()
     writer,weight_path = init_summary_writter(summary_dir)
     print(f"I have weights at :{weight_path}")
