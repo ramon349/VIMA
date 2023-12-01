@@ -339,7 +339,7 @@ def main():
         #traj_name="rearrange_then_restore",
         n_workers=32,
         batch_size=32,
-        n_epochs=5,
+        n_epochs=30,
         max_queue_size=300,
     )
     device = 'cuda:0'
